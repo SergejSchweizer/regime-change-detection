@@ -1,71 +1,32 @@
-"""
-Deribit API utility functions for fetching OHLCV and funding rate data.
-
-This module provides functions to fetch historical OHLCV (Open, High, Low, Close, Volume)
-data and funding rates from the Deribit exchange for both spot and perpetual markets.
-
-Usage:
-    from deribit_utils import fetch_deribit_ohlcv, fetch_deribit_funding_rates
-    from datetime import datetime, timedelta, timezone
-    
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=7)
-    
-    btc_spot = fetch_deribit_ohlcv("BTC", "spot", start_dt, end_dt)
-    btc_funding = fetch_deribit_funding_rates("BTC", start_dt, end_dt)
-"""
+from __future__ import annotations
 
 import math
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from typing import Any, Final, Literal, Sequence
 
 import pandas as pd
 import requests
+from requests import Response, Session
 from tqdm import tqdm
 
-# Deribit API endpoints
-BASE_URL = "https://www.deribit.com/api/v2/public/get_tradingview_chart_data"
-FUNDING_URL = "https://www.deribit.com/api/v2/public/get_funding_rate_history"
+MarketType = Literal["spot", "perpetual"]
+
+BASE_URL: Final[str] = "https://www.deribit.com/api/v2/public/get_tradingview_chart_data"
+FUNDING_URL: Final[str] = "https://www.deribit.com/api/v2/public/get_funding_rate_history"
 
 
 def fetch_deribit_ohlcv(
     base_asset: str,
-    market_type: str,
+    market_type: MarketType,
     start_dt: datetime,
     end_dt: datetime,
     resolution: str = "1",
     chunk_days: int = 7,
     sleep_seconds: float = 0.2,
 ) -> pd.DataFrame:
-    """
-    Fetch OHLCV data from Deribit exchange.
-
-    This function retrieves historical OHLCV (Open, High, Low, Close, Volume) data for spot or perpetual markets.
-
-    Parameters:
-        base_asset (str): The base asset symbol (e.g., 'BTC', 'ETH').
-        market_type (str): Type of market - 'spot' or 'perpetual'.
-        start_dt (datetime): Start date for data retrieval.
-        end_dt (datetime): End date for data retrieval.
-        resolution (str): Time resolution for OHLCV data (e.g., '1' for 1 minute, '60' for 1 hour).
-        chunk_days (int): Number of days to fetch in each API request chunk (will be optimized automatically).
-        sleep_seconds (float): Sleep time between requests to avoid rate limits.
-
-    Returns:
-        pd.DataFrame: DataFrame with OHLCV data indexed by timestamp.
-
-    Raises:
-        ValueError: If market_type is not 'spot' or 'perpetual'.
-        HTTPError: If API requests fail.
-
-    Examples:
-        # Fetch BTC spot OHLCV
-        btc_spot = fetch_deribit_ohlcv('BTC', 'spot', start_dt, end_dt)
-
-        # Fetch BTC perpetual OHLCV
-        btc_perp = fetch_deribit_ohlcv('BTC', 'perpetual', start_dt, end_dt)
-    """
-    # Determine instrument name based on market type
+    """Fetch OHLCV data for Deribit spot or perpetual instruments."""
+    # Map the user-facing market type to Deribit's instrument naming scheme.
     if market_type == "spot":
         instrument_name = f"{base_asset}_USDT"
     elif market_type == "perpetual":
@@ -73,65 +34,54 @@ def fetch_deribit_ohlcv(
     else:
         raise ValueError("market_type must be 'spot' or 'perpetual'")
 
-    # Calculate optimal chunk_days based on resolution to maximize data per request
-    max_candles_per_request = 7200  # Conservative estimate for Deribit API limit
-
-    # Calculate candles per day based on resolution
-    if resolution.endswith('D'):
-        candles_per_day = 1
+    # Keep each request within Deribit's practical candle limit by shrinking long windows.
+    max_candles_per_request: int = 7200
+    if resolution.endswith("D"):
+        candles_per_day: int = 1
     else:
-        minutes_per_candle = int(resolution)
-        candles_per_day = 1440 // minutes_per_candle  # 1440 minutes per day
+        minutes_per_candle: int = int(resolution)
+        candles_per_day = 1440 // minutes_per_candle
 
-    max_chunk_days = max_candles_per_request // candles_per_day
-    # Ensure at least 1 day
-    max_chunk_days = max(1, max_chunk_days)
+    max_chunk_days: int = max(1, max_candles_per_request // candles_per_day)
+    optimal_chunk_days: int = min(chunk_days, max_chunk_days)
 
-    # Optimize chunk_days: use the smaller of user setting and calculated max
-    optimal_chunk_days = min(chunk_days, max_chunk_days)
+    all_frames: list[pd.DataFrame] = []
+    session: Session = requests.Session()
 
-    # Initialize data containers
-    all_frames = []
-    session = requests.Session()
+    total_duration: float = (end_dt - start_dt).total_seconds()
+    chunk_duration: int = optimal_chunk_days * 24 * 3600
+    total_chunks: int = math.ceil(total_duration / chunk_duration)
+    pbar = tqdm(total=total_chunks, desc=f"Fetching {instrument_name} OHLCV")
 
-    # Calculate total chunks for progress bar using optimal chunk_days
-    total_duration = (end_dt - start_dt).total_seconds()
-    chunk_duration = optimal_chunk_days * 24 * 3600
-    total_chunks = math.ceil(total_duration / chunk_duration)
-
-    # Set up progress bar description
-    desc = f"Fetching {instrument_name} OHLCV"
-    pbar = tqdm(total=total_chunks, desc=desc)
-
-    # Chunked data fetching loop
-    chunk_start = start_dt
+    chunk_start: datetime = start_dt
     while chunk_start < end_dt:
-        chunk_end = min(chunk_start + timedelta(days=optimal_chunk_days), end_dt)
-
-        # Fetch OHLCV data
-        params = {
+        chunk_end: datetime = min(chunk_start + timedelta(days=optimal_chunk_days), end_dt)
+        params: dict[str, Any] = {
             "instrument_name": instrument_name,
             "start_timestamp": int(chunk_start.timestamp() * 1000),
             "end_timestamp": int(chunk_end.timestamp() * 1000),
             "resolution": resolution,
         }
 
-        r = session.get(BASE_URL, params=params, timeout=30)
-        r.raise_for_status()
-        payload = r.json()
+        response: Response = session.get(BASE_URL, params=params, timeout=30)
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
 
-        result = payload.get("result", {})
+        result: dict[str, Any] = payload.get("result", {})
         if result.get("status") == "ok" and result.get("ticks"):
-            df = pd.DataFrame({
-                "timestamp": pd.to_datetime(result["ticks"], unit="ms", utc=True),
-                "open": result["open"],
-                "high": result["high"],
-                "low": result["low"],
-                "close": result["close"],
-                "volume": result["volume"],
-                "cost": result["cost"],
-            })
-            all_frames.append(df)
+            all_frames.append(
+                pd.DataFrame(
+                    {
+                        "timestamp": pd.to_datetime(result["ticks"], unit="ms", utc=True),
+                        "open": result["open"],
+                        "high": result["high"],
+                        "low": result["low"],
+                        "close": result["close"],
+                        "volume": result["volume"],
+                        "cost": result["cost"],
+                    }
+                )
+            )
 
         chunk_start = chunk_end
         time.sleep(sleep_seconds)
@@ -139,18 +89,18 @@ def fetch_deribit_ohlcv(
 
     pbar.close()
 
-    # Process OHLCV data
     if not all_frames:
-        ohlcv_df = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "cost"])
-    else:
-        ohlcv_df = (
-            pd.concat(all_frames, ignore_index=True)
-            .drop_duplicates(subset="timestamp")
-            .sort_values("timestamp")
-            .set_index("timestamp")
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "volume", "cost"]
         )
 
-    return ohlcv_df
+    # Combine chunk responses into one time-indexed series without duplicate timestamps.
+    return (
+        pd.concat(all_frames, ignore_index=True)
+        .drop_duplicates(subset="timestamp")
+        .sort_values("timestamp")
+        .set_index("timestamp")
+    )
 
 
 def fetch_deribit_funding_rates(
@@ -161,70 +111,37 @@ def fetch_deribit_funding_rates(
     chunk_days: int = 30,
     sleep_seconds: float = 0.2,
 ) -> pd.DataFrame:
-    """
-    Fetch funding rate history for perpetual markets from Deribit exchange.
+    """Fetch Deribit perpetual funding rate history."""
+    instrument_name: str = f"{base_asset}-PERPETUAL"
+    all_funding: list[pd.DataFrame] = []
+    session: Session = requests.Session()
 
-    This function uses the separate Deribit endpoint:
-    /public/get_funding_rate_history
-
-    Parameters:
-        base_asset (str): The base asset symbol (e.g., 'BTC', 'ETH').
-        start_dt (datetime): Start date for data retrieval.
-        end_dt (datetime): End date for data retrieval.
-        resolution (str): Time resolution for funding rates (e.g., '8h', '1D').
-        chunk_days (int): Number of days to fetch in each API request chunk.
-        sleep_seconds (float): Sleep time between requests to avoid rate limits.
-
-    Returns:
-        pd.DataFrame: DataFrame with funding rate data indexed by timestamp.
-                      Columns: funding_rate, index_price, mark_price, interest_8h, interest_1h
-
-    Raises:
-        ValueError: If base_asset is invalid.
-        HTTPError: If API requests fail.
-
-    Examples:
-        # Fetch BTC perpetual funding rates
-        btc_funding = fetch_deribit_funding_rates('BTC', start_dt, end_dt)
-    """
-    # Determine instrument name for perpetual
-    instrument_name = f"{base_asset}-PERPETUAL"
-    
-    # Initialize data containers
-    all_funding = []
-    session = requests.Session()
-    
-    # Calculate total chunks for progress bar
-    total_duration = (end_dt - start_dt).total_seconds()
-    chunk_duration = chunk_days * 24 * 3600
-    total_chunks = math.ceil(total_duration / chunk_duration)
-    
-    # Set up progress bar
+    total_duration: float = (end_dt - start_dt).total_seconds()
+    chunk_duration: int = chunk_days * 24 * 3600
+    total_chunks: int = math.ceil(total_duration / chunk_duration)
     pbar = tqdm(total=total_chunks, desc=f"Fetching {instrument_name} Funding Rates")
-    
-    # Chunked data fetching loop
-    chunk_start = start_dt
-    while chunk_start < end_dt:
-        chunk_end = min(chunk_start + timedelta(days=chunk_days), end_dt)
 
-        funding_params = {
+    chunk_start: datetime = start_dt
+    while chunk_start < end_dt:
+        chunk_end: datetime = min(chunk_start + timedelta(days=chunk_days), end_dt)
+        funding_params: dict[str, Any] = {
             "instrument_name": instrument_name,
             "start_timestamp": int(chunk_start.timestamp() * 1000),
             "end_timestamp": int(chunk_end.timestamp() * 1000),
             "resolution": resolution,
         }
 
-        r_funding = session.get(FUNDING_URL, params=funding_params, timeout=30)
-        r_funding.raise_for_status()
-        payload_funding = r_funding.json()
+        response: Response = session.get(FUNDING_URL, params=funding_params, timeout=30)
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
 
-        result_funding = payload_funding.get("result", [])
-        if result_funding:
-            # result_funding is a list of funding rate records
-            funding_df = pd.DataFrame(result_funding)
-            # Select and rename columns if they exist
+        result: list[dict[str, Any]] = payload.get("result", [])
+        if result:
+            funding_df: pd.DataFrame = pd.DataFrame(result)
             if "timestamp" in funding_df.columns:
-                funding_df["timestamp"] = pd.to_datetime(funding_df["timestamp"], unit="ms", utc=True)
+                funding_df["timestamp"] = pd.to_datetime(
+                    funding_df["timestamp"], unit="ms", utc=True
+                )
                 all_funding.append(funding_df)
 
         chunk_start = chunk_end
@@ -233,13 +150,115 @@ def fetch_deribit_funding_rates(
 
     pbar.close()
 
-    # Process funding data
     if not all_funding:
-        return pd.DataFrame(columns=["timestamp", "funding_rate", "index_price", "mark_price", "interest_8h", "interest_1h"])
-    funding_df = (
+        return pd.DataFrame(
+            columns=[
+                "timestamp",
+                "funding_rate",
+                "index_price",
+                "mark_price",
+                "interest_8h",
+                "interest_1h",
+            ]
+        )
+
+    # Funding responses are also chunked, so normalize them into one indexed frame.
+    return (
         pd.concat(all_funding, ignore_index=True)
         .drop_duplicates(subset="timestamp")
         .sort_values("timestamp")
         .set_index("timestamp")
     )
-    return funding_df
+
+
+def merge_deribit_dataframes(
+    spot_df: pd.DataFrame,
+    perp_df: pd.DataFrame,
+    funding_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge Deribit spot, perpetual, and funding rate data into one DataFrame."""
+    # Use outer joins so downstream code can decide how aggressively to filter missing data.
+    merged_data: pd.DataFrame = pd.merge(
+        spot_df,
+        perp_df,
+        left_index=True,
+        right_index=True,
+        suffixes=("_spot", "_perp"),
+        how="outer",
+    )
+    merged_data = pd.merge(
+        merged_data,
+        funding_df,
+        left_index=True,
+        right_index=True,
+        how="outer",
+    )
+    merged_data.index.name = "timestamp"
+    return merged_data
+
+
+def generate_merged_deribit_dataset(
+    base_asset: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    ohlcv_resolution: str = "1",
+    funding_resolution: str = "8h",
+    spot_chunk_days: int = 7,
+    perp_chunk_days: int = 7,
+    funding_chunk_days: int = 30,
+    save_csv: bool = True,
+    csv_path: str | None = None,
+    dropna_subset: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Fetch spot, perpetual, and funding data for a base asset and merge it.
+
+    Set ``dropna_subset`` to remove rows where any of the named columns are missing.
+    For example, use ``dropna_subset=("open_spot", "open_perp")`` to keep only rows
+    where both spot and perpetual OHLCV data are present.
+    """
+    # Fetch each data source separately so callers can control resolutions and chunk sizes.
+    spot_data: pd.DataFrame = fetch_deribit_ohlcv(
+        base_asset=base_asset,
+        market_type="spot",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        resolution=ohlcv_resolution,
+        chunk_days=spot_chunk_days,
+    )
+    perp_data: pd.DataFrame = fetch_deribit_ohlcv(
+        base_asset=base_asset,
+        market_type="perpetual",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        resolution=ohlcv_resolution,
+        chunk_days=perp_chunk_days,
+    )
+    funding_rates: pd.DataFrame = fetch_deribit_funding_rates(
+        base_asset=base_asset,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        resolution=funding_resolution,
+        chunk_days=funding_chunk_days,
+    )
+
+    merged_data: pd.DataFrame = merge_deribit_dataframes(
+        spot_data, perp_data, funding_rates
+    )
+
+    if dropna_subset is not None:
+        merged_data = merged_data.dropna(subset=list(dropna_subset))
+
+    if save_csv:
+        output_path: str = csv_path or f"merged_{base_asset.lower()}_data.csv"
+        merged_data.to_csv(output_path, index_label="timestamp")
+        print(f"Merged {base_asset} data saved to '{output_path}'")
+
+    return merged_data
+
+
+__all__ = [
+    "fetch_deribit_ohlcv",
+    "fetch_deribit_funding_rates",
+    "merge_deribit_dataframes",
+    "generate_merged_deribit_dataset",
+]
