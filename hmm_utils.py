@@ -13,8 +13,19 @@ It supports:
 2. feature cleaning
 3. Gaussian HMM fitting on candidate feature subsets
 4. generation of HMM regime features
-5. unsupervised scoring of HMM feature subsets using regime-quality diagnostics
+5. unsupervised scoring of HMM feature subsets using a simple scientific criterion
 6. automatic search for strong HMM input subsets
+
+Selection principle
+-------------------
+The best feature subset and number of hidden states are selected by
+maximizing the in-sample log-likelihood of the Gaussian HMM, subject to:
+
+- convergence of the estimation algorithm
+- a minimum occupancy constraint for each hidden state
+
+This avoids degenerate solutions in which one or more states are used only
+rarely and are therefore not economically interpretable.
 
 Important
 ---------
@@ -28,10 +39,9 @@ That comes later.
 Typical use
 -----------
 Use this module to find HMM feature subsets that produce:
-- persistent regimes
-- balanced states
-- meaningful run lengths
-- interpretable latent state structure
+- statistically well-fitted latent-state models
+- non-degenerate hidden states
+- interpretable regime structure
 """
 
 import itertools
@@ -247,7 +257,7 @@ def fit_hmm(
     df_train: pd.DataFrame,
     feature_cols: List[str],
     n_states: int = 3,
-    covariance_type: str = "full",
+    covariance_type: str = "diag",
     n_iter: int = 200,
     random_state: int = 42
 ) -> Tuple[GaussianHMM, StandardScaler]:
@@ -276,10 +286,14 @@ def fit_hmm(
     """
     if n_states < 2:
         raise ValueError("n_states must be >= 2.")
+    if not feature_cols:
+        raise ValueError("feature_cols must not be empty.")
 
     x_df = clean_feature_frame(df_train, feature_cols).dropna()
     if x_df.empty:
         raise ValueError("No valid rows for HMM fitting after dropna().")
+    if len(x_df) <= n_states:
+        raise ValueError("Not enough valid rows relative to number of states.")
 
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(x_df)
@@ -390,7 +404,7 @@ def evaluate_hmm_feature_subset(
     random_state: int = 42
 ) -> Dict:
     """
-    Fit an HMM on one feature subset and compute regime-quality diagnostics.
+    Fit an HMM on one feature subset and compute regime diagnostics.
 
     Parameters
     ----------
@@ -410,7 +424,7 @@ def evaluate_hmm_feature_subset(
     Returns
     -------
     dict
-        Regime-quality diagnostics for this subset.
+        Model diagnostics for this subset.
     """
     hmm, scaler = fit_hmm(
         df_train=df_train,
@@ -441,6 +455,7 @@ def evaluate_hmm_feature_subset(
         "feature_cols": feature_cols,
         "n_states": n_states,
         "n_features": len(feature_cols),
+        "n_obs_used": int(len(x_df)),
         "converged": converged,
         "train_loglik": train_loglik,
         "avg_self_transition": avg_self_transition,
@@ -454,41 +469,38 @@ def evaluate_hmm_feature_subset(
     }
 
 
-def score_hmm_diagnostics(row: pd.Series) -> float:
+def simple_hmm_selection_score(
+    row: pd.Series,
+    min_state_fraction_threshold: float = 0.05
+) -> float:
     """
-    Heuristic score for HMM regime quality.
+    Simple scientific model-selection score for HMM feature subsets.
 
-    Higher is better.
+    Selection rule
+    --------------
+    Maximize the in-sample log-likelihood subject to:
+    - convergence
+    - minimum state occupancy
 
-    Rewards
+    Parameters
+    ----------
+    row:
+        One diagnostics row.
+    min_state_fraction_threshold:
+        Minimum required share of observations in every hidden state.
+
+    Returns
     -------
-    - persistent regimes
-    - non-degenerate state balance
-    - non-trivial run lengths
-
-    Slightly penalizes
-    ------------------
-    - high average state entropy
-
-    Notes
-    -----
-    This is an unsupervised ranking score, not a predictive score.
+    float
+        Selection score. Higher is better.
     """
     if not bool(row["converged"]):
         return -np.inf
 
-    avg_self_transition = float(row["avg_self_transition"])
-    min_state_fraction = float(row["min_state_fraction"])
-    median_run_length = float(row["median_run_length"])
-    avg_entropy = float(row["avg_entropy"])
+    if float(row["min_state_fraction"]) < min_state_fraction_threshold:
+        return -np.inf
 
-    score = (
-        0.45 * avg_self_transition
-        + 0.30 * min_state_fraction
-        + 0.20 * np.tanh(median_run_length / 10.0)
-        - 0.05 * avg_entropy
-    )
-    return float(score)
+    return float(row["train_loglik"])
 
 
 # =========================================================
@@ -504,6 +516,7 @@ def automatic_hmm_feature_selection(
     train_frac: float = 0.6,
     val_frac: float = 0.2,
     correlation_filter_threshold: Optional[float] = 0.95,
+    min_state_fraction_threshold: float = 0.05,
     top_k: Optional[int] = 20,
     covariance_type: str = "full",
     n_iter: int = 200,
@@ -511,8 +524,8 @@ def automatic_hmm_feature_selection(
     verbose: bool = True
 ) -> pd.DataFrame:
     """
-    Automatically search for strong HMM feature subsets using only
-    unsupervised regime-quality diagnostics.
+    Automatically search for strong HMM feature subsets using a simple
+    scientific selection rule.
 
     Procedure
     ---------
@@ -520,7 +533,10 @@ def automatic_hmm_feature_selection(
     2. optionally remove highly correlated candidates
     3. generate feature subsets
     4. fit HMM for each subset and state count
-    5. rank by HMM regime-quality score
+    5. rank by:
+       - convergence
+       - minimum state occupancy
+       - training log-likelihood
 
     Parameters
     ----------
@@ -541,6 +557,8 @@ def automatic_hmm_feature_selection(
     correlation_filter_threshold:
         Optional correlation filter threshold on train data.
         Set to None to disable.
+    min_state_fraction_threshold:
+        Minimum required state occupancy for model admissibility.
     top_k:
         Keep only the top_k successful rows if not None.
     covariance_type:
@@ -561,6 +579,12 @@ def automatic_hmm_feature_selection(
         raise ValueError("candidate_features is empty.")
     if not n_states_list:
         raise ValueError("n_states_list is empty.")
+    if subset_min_size < 1:
+        raise ValueError("subset_min_size must be >= 1.")
+    if subset_max_size < subset_min_size:
+        raise ValueError("subset_max_size must be >= subset_min_size.")
+    if not (0.0 <= min_state_fraction_threshold < 1.0):
+        raise ValueError("min_state_fraction_threshold must lie in [0, 1).")
 
     df_train, _, _ = make_time_splits(df, train_frac=train_frac, val_frac=val_frac)
 
@@ -601,7 +625,12 @@ def automatic_hmm_feature_selection(
                         n_iter=n_iter,
                         random_state=random_state
                     )
-                    diag["hmm_diag_score"] = score_hmm_diagnostics(pd.Series(diag))
+
+                    diag["selection_score"] = simple_hmm_selection_score(
+                        pd.Series(diag),
+                        min_state_fraction_threshold=min_state_fraction_threshold
+                    )
+                    diag["eligible"] = bool(np.isfinite(diag["selection_score"]))
                     diag["status"] = "ok"
                     diag["error"] = None
                     rows.append(diag)
@@ -611,6 +640,7 @@ def automatic_hmm_feature_selection(
                         "feature_cols": subset,
                         "n_states": n_states,
                         "n_features": len(subset),
+                        "n_obs_used": np.nan,
                         "converged": False,
                         "train_loglik": np.nan,
                         "avg_self_transition": np.nan,
@@ -621,7 +651,8 @@ def automatic_hmm_feature_selection(
                         "mean_run_length": np.nan,
                         "n_runs": np.nan,
                         "transition_matrix": None,
-                        "hmm_diag_score": -np.inf,
+                        "selection_score": -np.inf,
+                        "eligible": False,
                         "status": "skipped",
                         "error": f"{type(e).__name__}: {e}"
                     })
@@ -639,7 +670,7 @@ def automatic_hmm_feature_selection(
 
     if not ok_df.empty:
         ok_df = ok_df.sort_values(
-            by=["hmm_diag_score", "avg_self_transition", "min_state_fraction"],
+            by=["eligible", "selection_score", "train_loglik", "min_state_fraction"],
             ascending=False
         ).reset_index(drop=True)
 
@@ -649,10 +680,6 @@ def automatic_hmm_feature_selection(
     out = pd.concat([ok_df, bad_df], axis=0).reset_index(drop=True)
     return out
 
-
-# =========================================================
-# 7) HELPERS TO READ RESULTS
-# =========================================================
 
 # =========================================================
 # 7) HELPERS TO READ RESULTS
@@ -682,18 +709,24 @@ def extract_best_hmm_feature_subset(
     if ok_df.empty:
         raise ValueError("No successful rows in results_df.")
 
-    best_row = ok_df.iloc[[0]].copy()   # keep as DataFrame, not Series
+    eligible_df = ok_df[ok_df["eligible"] == True].copy()
+    if eligible_df.empty:
+        raise ValueError("No eligible rows found. All models failed the selection constraints.")
+
+    best_row = eligible_df.iloc[[0]].copy()
 
     out = best_row[[
         "feature_cols",
         "n_states",
         "n_features",
-        "hmm_diag_score",
-        "avg_self_transition",
+        "n_obs_used",
+        "selection_score",
+        "train_loglik",
         "min_state_fraction",
+        "avg_self_transition",
         "median_run_length",
         "avg_entropy",
-        "train_loglik",
+        "eligible",
         "status"
     ]].reset_index(drop=True)
 
@@ -733,12 +766,14 @@ def summarize_hmm_results(
         "feature_cols",
         "n_states",
         "n_features",
-        "hmm_diag_score",
-        "avg_self_transition",
+        "n_obs_used",
+        "eligible",
+        "selection_score",
+        "train_loglik",
         "min_state_fraction",
+        "avg_self_transition",
         "median_run_length",
         "avg_entropy",
-        "train_loglik",
     ]
     available_cols = [c for c in cols if c in ok_df.columns]
 
@@ -750,3 +785,59 @@ def summarize_hmm_results(
         )
 
     return summary_df
+
+
+# =========================================================
+# 8) FIT BEST MODEL CONVENIENCE FUNCTION
+# =========================================================
+
+def fit_best_hmm_from_results(
+    df: pd.DataFrame,
+    results_df: pd.DataFrame,
+    train_frac: float = 0.6,
+    val_frac: float = 0.2,
+    covariance_type: str = "full",
+    n_iter: int = 200,
+    random_state: int = 42
+) -> Tuple[GaussianHMM, StandardScaler, List[str], int]:
+    """
+    Fit the best HMM found by automatic_hmm_feature_selection on the train split.
+
+    Parameters
+    ----------
+    df:
+        Full time-ordered dataframe.
+    results_df:
+        Output of automatic_hmm_feature_selection.
+    train_frac:
+        Train fraction.
+    val_frac:
+        Validation fraction.
+    covariance_type:
+        Covariance type for GaussianHMM.
+    n_iter:
+        Maximum EM iterations.
+    random_state:
+        Random seed.
+
+    Returns
+    -------
+    tuple
+        (hmm, scaler, best_feature_cols, best_n_states)
+    """
+    best_df = extract_best_hmm_feature_subset(results_df)
+    best_feature_cols = best_df.iloc[0]["feature_cols"]
+    best_n_states = int(best_df.iloc[0]["n_states"])
+
+    df_train, _, _ = make_time_splits(df, train_frac=train_frac, val_frac=val_frac)
+
+    hmm, scaler = fit_hmm(
+        df_train=df_train,
+        feature_cols=best_feature_cols,
+        n_states=best_n_states,
+        covariance_type=covariance_type,
+        n_iter=n_iter,
+        random_state=random_state
+    )
+
+    return hmm, scaler, best_feature_cols, best_n_states
