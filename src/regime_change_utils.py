@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from deribit_utils import DEFAULT_LOOKBACK_DAYS, generate_merged_deribit_dataset
+from src.deribit_utils import DEFAULT_LOOKBACK_DAYS, generate_merged_deribit_dataset
 
 
 EPSILON = 1e-8
@@ -23,7 +23,7 @@ class RegimeThresholds:
 
 
 def load_or_create_deribit_dataset(
-    csv_path: str | Path = "deribit_data.csv",
+    csv_path: str | Path = "data/deribit_data.csv",
     base_asset: str = "BTC",
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     end_dt: datetime | None = None,
@@ -204,10 +204,11 @@ def classify_volatility_regimes(
 
 def save_enriched_dataset(
     df: pd.DataFrame,
-    csv_path: str | Path = "deribit_enriched_data.csv",
+    csv_path: str | Path = "data/deribit_enriched_data.csv",
 ) -> Path:
     """Persist the engineered dataset to disk."""
     output_path = Path(csv_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path)
     return output_path
 

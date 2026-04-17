@@ -134,7 +134,7 @@ def _format_feature_list_for_tqdm(feature_cols: List[str], max_len: int = 60) ->
     return text[: max_len - 3] + "..."
 
 
-def load_dataset(csv_path: str | Path = "deribit_enriched_data.csv") -> pd.DataFrame:
+def load_dataset(csv_path: str | Path = "data/deribit_enriched_data.csv") -> pd.DataFrame:
     """Load a time-indexed dataset used for HMM analysis."""
     df = pd.read_csv(csv_path)
     timestamp = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")

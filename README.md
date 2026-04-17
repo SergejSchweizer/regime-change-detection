@@ -2,20 +2,20 @@
 
 This repository studies BTC market regimes using Deribit spot, perpetual, and funding-rate data. The workflow is split into two notebooks and three focused utility modules:
 
-- `deribit_utils.py` for Deribit data collection and dataset assembly
-- `regime_change_utils.py` for feature engineering and simple rule-based volatility regime views
-- `hmm_utils.py` for Hidden Markov Model fitting, feature selection, and latent regime diagnostics
+- `src/deribit_utils.py` for Deribit data collection and dataset assembly
+- `src/regime_change_utils.py` for feature engineering and simple rule-based volatility regime views
+- `src/hmm_utils.py` for Hidden Markov Model fitting, feature selection, and latent regime diagnostics
 
 ## Project Layout
 
-- `00_feature_engineering_and_volatility_regimes.ipynb`: loads raw Deribit data, engineers market features, and visualizes simple volatility-based regimes
-- `01_hmm_regime_analysis.ipynb`: searches for useful HMM feature subsets, fits a selected HMM, and inspects latent market regimes
-- `deribit_utils.py`: Deribit API fetching and merged dataset creation
-- `regime_change_utils.py`: feature engineering, volatility regime labeling, and exploratory plotting
-- `hmm_utils.py`: HMM training, subset search, regime interpretation, and HMM-specific plotting
-- `deribit_data.csv`: merged raw Deribit market dataset
-- `deribit_enriched_data.csv`: feature-engineered dataset used by the HMM notebook
-- `hmm_feature_selection_summary.csv`: saved summary of top HMM feature-search results
+- `notebooks/00_data_preparation_and_feature_engineering.ipynb`: loads raw Deribit data, engineers market features, and visualizes simple volatility-based regimes
+- `notebooks/01_regime_detection_and_hmm_analysis.ipynb`: searches for useful HMM feature subsets, fits a selected HMM, and inspects latent market regimes
+- `src/deribit_utils.py`: Deribit API fetching and merged dataset creation
+- `src/regime_change_utils.py`: feature engineering, volatility regime labeling, and exploratory plotting
+- `src/hmm_utils.py`: HMM training, subset search, regime interpretation, and HMM-specific plotting
+- `data/deribit_data.csv`: merged raw Deribit market dataset
+- `data/deribit_enriched_data.csv`: feature-engineered dataset used by the HMM notebook
+- `data/hmm_feature_selection_summary.csv`: saved summary of top HMM feature-search results
 - `requirements.txt`: Python dependencies
 
 ## Requirements
@@ -28,7 +28,7 @@ pip install -r requirements.txt
 
 ## Module Guide
 
-### `deribit_utils.py`
+### `src/deribit_utils.py`
 
 This module handles data ingestion from the Deribit public API.
 
@@ -51,7 +51,7 @@ Typical example:
 
 ```python
 from datetime import datetime, timezone
-from deribit_utils import generate_merged_deribit_dataset
+from src.deribit_utils import generate_merged_deribit_dataset
 
 df = generate_merged_deribit_dataset(
     base_asset="BTC",
@@ -59,11 +59,11 @@ df = generate_merged_deribit_dataset(
     end_dt=datetime(2024, 3, 1, tzinfo=timezone.utc),
     ohlcv_resolution="60",
     funding_resolution="8h",
-    csv_path="deribit_data.csv",
+    csv_path="data/deribit_data.csv",
 )
 ```
 
-### `regime_change_utils.py`
+### `src/regime_change_utils.py`
 
 This module contains the feature-engineering and rule-based regime tooling used in the exploratory notebook.
 
@@ -85,18 +85,18 @@ The engineered feature families now documented in the notebook include return, a
 Typical example:
 
 ```python
-from regime_change_utils import (
+from src.regime_change_utils import (
     engineer_regime_change_features,
     load_or_create_deribit_dataset,
     save_enriched_dataset,
 )
 
-raw_df = load_or_create_deribit_dataset(csv_path="deribit_data.csv", base_asset="BTC")
+raw_df = load_or_create_deribit_dataset(csv_path="data/deribit_data.csv", base_asset="BTC")
 df = engineer_regime_change_features(raw_df)
-save_enriched_dataset(df, csv_path="deribit_enriched_data.csv")
+save_enriched_dataset(df, csv_path="data/deribit_enriched_data.csv")
 ```
 
-### `hmm_utils.py`
+### `src/hmm_utils.py`
 
 This module is focused on unsupervised HMM-based regime extraction.
 
@@ -180,7 +180,7 @@ How feature-subset selection works:
 Typical example:
 
 ```python
-from hmm_utils import automatic_hmm_feature_selection, summarize_hmm_results
+from src.hmm_utils import automatic_hmm_feature_selection, summarize_hmm_results
 
 results = automatic_hmm_feature_selection(
     df=df,
@@ -195,7 +195,7 @@ summary = summarize_hmm_results(results, top_n=10, stringify_features=True)
 
 ## Notebook Guide
 
-### `00_feature_engineering_and_volatility_regimes.ipynb`
+### `notebooks/00_data_preparation_and_feature_engineering.ipynb`
 
 This notebook is the feature-engineering and exploratory entry point.
 
@@ -203,7 +203,7 @@ It is used to:
 
 - load cached Deribit data or regenerate it from the API
 - engineer market features used later in regime modeling
-- save the enriched dataset to `deribit_enriched_data.csv`
+- save the enriched dataset to `data/deribit_enriched_data.csv`
 - visualize simple rule-based volatility regimes
 
 The regimes in this notebook are rule-based volatility labels, not latent HMM states.
@@ -219,7 +219,7 @@ The three main plot takeaways are:
 - the binary `high_vol` rule makes the flagged turbulent timestamps explicit
 - the slower 72-hour signal highlights that calm and stressed periods tend to persist rather than appear as isolated spikes
 
-### `01_hmm_regime_analysis.ipynb`
+### `notebooks/01_regime_detection_and_hmm_analysis.ipynb`
 
 This notebook is the latent-regime analysis notebook.
 
@@ -234,13 +234,13 @@ It is used to:
 The notebook now also includes:
 
 - a "What The HMM Does" section with the state-transition, emission, posterior-probability, and entropy equations
-- a "How Selection Works" section with the exact eligibility rule and ranking equation used in `hmm_utils.py`
+- a "How Selection Works" section with the exact eligibility rule and ranking equation used in `src/hmm_utils.py`
 - markdown interpretation notes for each major output block, including the selection summary, chosen configuration, state interpretation, recent regime chart, full-history overlay, regime distribution, run-length statistics, transition matrix, and posterior confidence
 
 ## Typical Workflow
 
-1. Run `00_feature_engineering_and_volatility_regimes.ipynb` to fetch BTC Deribit data if needed and produce the enriched feature dataset.
-2. Use `deribit_enriched_data.csv` as input to `01_hmm_regime_analysis.ipynb`.
+1. Run `notebooks/00_data_preparation_and_feature_engineering.ipynb` to fetch BTC Deribit data if needed and produce the enriched feature dataset.
+2. Use `data/deribit_enriched_data.csv` as input to `notebooks/01_regime_detection_and_hmm_analysis.ipynb`.
 3. Expand the notebook's named feature blocks into candidate HMM inputs, run the HMM feature search, and inspect the top-ranked configurations.
 4. Fit a selected HMM row, add `hmm_*` features back to the dataframe, and assign semantic regime labels from state profiles.
 5. Analyze latent regimes through recent and full-history overlays, run-length statistics, transition matrices, and posterior probabilities.
@@ -248,6 +248,6 @@ The notebook now also includes:
 ## Notes
 
 - The repository assumes time-ordered market data.
-- `hmm_utils.py` is unsupervised and optimized for regime structure quality, not classifier performance.
+- `src/hmm_utils.py` is unsupervised and optimized for regime structure quality, not classifier performance.
 - `xgboost` is listed in `requirements.txt`, but there is currently no XGBoost-based workflow in the repository.
-- The notebooks currently import directly from `regime_change_utils.py` and `hmm_utils.py`.
+- The notebooks currently import directly from `src.regime_change_utils` and `src.hmm_utils`.

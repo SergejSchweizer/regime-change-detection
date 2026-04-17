@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
@@ -239,6 +240,7 @@ def generate_merged_deribit_dataset(
 
     if save_csv:
         output_path = csv_path or f"merged_{base_asset.lower()}_data.csv"
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         merged_data.to_csv(output_path, index_label="timestamp")
         print(f"Merged {base_asset} data saved to '{output_path}'")
 
